@@ -234,6 +234,46 @@ func TestMetaBackend_emptyLegacyRemote(t *testing.T) {
 	}
 }
 
+// Saved backend state matching config
+func TestMetaBackend_configuredUnchanged(t *testing.T) {
+	defer testChdir(t, testFixturePath("backend-unchanged"))()
+
+	// Setup the meta
+	m := testMetaBackend(t, nil)
+
+	// Get the backend
+	b, err := m.Backend(nil)
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Check the state
+	s, err := b.State()
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	if err := s.RefreshState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	state := s.State()
+	if state == nil {
+		t.Fatal("nil state")
+	}
+	if state.Lineage != "configuredUnchanged" {
+		t.Fatalf("bad: %#v", state)
+	}
+
+	// Verify the default paths don't exist
+	if _, err := os.Stat(DefaultStateFilename); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Verify a backup doesn't exist
+	if _, err := os.Stat(DefaultStateFilename + DefaultBackupExtension); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+}
+
 func testMetaBackend(t *testing.T, args []string) *Meta {
 	var m Meta
 	m.Ui = new(cli.MockUi)

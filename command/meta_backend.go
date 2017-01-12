@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/terraform/backend"
 	backendlegacy "github.com/hashicorp/terraform/backend/legacy"
-	"github.com/hashicorp/terraform/builtin/backends/local"
+	backendlocal "github.com/hashicorp/terraform/builtin/backends/local"
 	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/terraform"
@@ -99,7 +99,7 @@ func (m *Meta) Backend(opts *BackendOpts) (backend.Enhanced, error) {
 	log.Printf("[INFO] command: backend %T is not enhanced, wrapping in local", b)
 
 	// Build the local backend
-	return &local.Local{
+	return &backendlocal.Local{
 		CLI:             m.Ui,
 		CLIColor:        m.Colorize(),
 		StatePath:       statePath,
@@ -245,7 +245,7 @@ func (m *Meta) backendFromConfig(
 		// If our configuration is the same, then we're just initializing
 		// a previously configured remote backend.
 		if !s.Backend.Empty() && s.Backend.Hash == c.Hash() {
-			panic("unhandled")
+			return m.backend_C_r_S_unchanged(c, sMgr)
 		}
 
 		panic("unhandled")
@@ -330,6 +330,54 @@ func (m *Meta) backend_c_R_s(
 	return b, nil
 }
 
+// Initiailizing an unchanged saved backend
+func (m *Meta) backend_C_r_S_unchanged(
+	c *config.Backend, sMgr state.State) (backend.Backend, error) {
+	s := sMgr.State()
+
+	// Create the config. We do this from the backend state since this
+	// has the complete configuration data whereas the config itself
+	// may require input.
+	rawC, err := config.NewRawConfig(s.Backend.Config)
+	if err != nil {
+		return nil, fmt.Errorf("Error configuring backend: %s", err)
+	}
+	config := terraform.NewResourceConfig(rawC)
+
+	// Get the backend
+	f, ok := Backends[s.Backend.Type]
+	if !ok {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendSavedUnknown), s.Backend.Type)
+	}
+	b := f()
+
+	// Configure
+	if err := b.Configure(config); err != nil {
+		return nil, fmt.Errorf(errBackendSavedConfig, s.Backend.Type, err)
+	}
+
+	return b, nil
+}
+
+// Backends is the list of available backends. This is currently a hardcoded
+// list that can't be modified without recompiling Terraform. This is done
+// because the API for backends uses complex structures and supporting that
+// over the plugin system is currently prohibitively difficult. For those
+// wanting to implement a custom backend, recompilation should not be a
+// high barrier.
+var Backends map[string]func() backend.Backend
+
+func init() {
+	// Our hardcoded backends
+	Backends = map[string]func() backend.Backend{
+		"local": func() backend.Backend { return &backendlocal.Local{} },
+	}
+
+	// Add the legacy remote backends that haven't yet been convertd to
+	// the new backend API.
+	backendlegacy.Init(Backends)
+}
+
 const errBackendLegacyConfig = `
 One or more errors occurred while configuring the legacy remote state.
 If fixing these errors requires changing your remote state configuration,
@@ -341,6 +389,27 @@ TODO: URL
 The error(s) configuring the legacy remote state:
 
 %s
+`
+
+const errBackendSavedConfig = `
+Error configuring the backend %q: %s
+
+Please update the configuration in your Terraform files to fix this error.
+If you'd like to update the configuration interactively without storing
+the values in your configuration, run "terraform init".
+`
+
+const errBackendSavedUnknown = `
+The backend %q could not be found.
+
+This is the backend that this Terraform environment is configured to use
+both in your configuration and saved locally as your last-used backend.
+If it isn't found, it could mean an alternate version of Terraform was
+used with this configuration. Please use the proper version of Terraform that
+contains support for this backend.
+
+If you'd like to force remove this backend, you must update your configuration
+to not use the backend and run "terraform init" (or any other command) again.
 `
 
 const warnBackendLegacy = `

@@ -57,9 +57,12 @@ type Local struct {
 
 	schema *schema.Backend
 	opLock sync.Mutex
+	once   sync.Once
 }
 
 func (b *Local) Validate(c *terraform.ResourceConfig) ([]string, []error) {
+	b.once.Do(b.init)
+
 	f := b.schema.Validate
 	if b.Backend != nil {
 		f = b.Backend.Validate
@@ -69,6 +72,8 @@ func (b *Local) Validate(c *terraform.ResourceConfig) ([]string, []error) {
 }
 
 func (b *Local) Configure(c *terraform.ResourceConfig) error {
+	b.once.Do(b.init)
+
 	f := b.schema.Configure
 	if b.Backend != nil {
 		f = b.Backend.Configure
@@ -161,4 +166,34 @@ func (b *Local) Colorize() *colorstring.Colorize {
 		Colors:  colorstring.DefaultColors,
 		Disable: true,
 	}
+}
+
+func (b *Local) init() {
+	b.schema = &schema.Backend{
+		Schema: map[string]*schema.Schema{
+			"path": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+		},
+
+		ConfigureFunc: b.schemaConfigure,
+	}
+}
+
+func (b *Local) schemaConfigure(ctx context.Context) error {
+	d := schema.FromContextBackendConfig(ctx)
+
+	// Set the path if it is set
+	pathRaw, ok := d.GetOk("path")
+	if ok {
+		path := pathRaw.(string)
+		if path == "" {
+			return fmt.Errorf("configured path is empty")
+		}
+
+		b.StatePath = path
+	}
+
+	return nil
 }

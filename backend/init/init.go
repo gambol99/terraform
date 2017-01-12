@@ -9,20 +9,3 @@
 // Operation, etc.). All initialization functions such as Input, Validate,
 // Configure will be called.
 package backendinit
-
-import (
-	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/config"
-)
-
-// Backends is the list of available backends.
-//
-// This can be modified before any initialization to add or remove the
-// list of available backends. This will be empty by default, use the
-// backend/builtin package to get the built-in list of backends.
-var Backends map[string]func() backend.Backend
-
-// FromConfig initializes a backend with the given configuration.
-func FromConfig(b *config.Backend, opts *backend.CLIOpts) (backend.Backend, error) {
-	return nil, nil
-}
