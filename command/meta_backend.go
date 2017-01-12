@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/errwrap"
+	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/terraform/backend"
 	backendlegacy "github.com/hashicorp/terraform/backend/legacy"
 	backendlocal "github.com/hashicorp/terraform/builtin/backends/local"
@@ -238,7 +239,7 @@ func (m *Meta) backendFromConfig(
 
 	// Configuring a backend for the first time.
 	case c != nil && s.Remote.Empty() && s.Backend.Empty():
-		fallthrough
+		return m.backend_C_r_s(c, sMgr)
 
 	// Potentially changing a backend configuration
 	case c != nil && s.Remote.Empty() && !s.Backend.Empty():
@@ -330,6 +331,60 @@ func (m *Meta) backend_c_R_s(
 	return b, nil
 }
 
+// Configuring a backend for the first time
+func (m *Meta) backend_C_r_s(
+	c *config.Backend, sMgr state.State) (backend.Backend, error) {
+	// Create the config.
+	config := terraform.NewResourceConfig(c.RawConfig)
+
+	// Get the backend
+	f, ok := Backends[c.Type]
+	if !ok {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendNewUnknown), c.Type)
+	}
+	b := f()
+
+	// TODO: input
+
+	// Validate
+	warns, errs := b.Validate(config)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf(
+			"Error configuring the backend %q: %s",
+			c.Type, multierror.Append(nil, errs...))
+	}
+	if len(warns) > 0 {
+		// TODO: warnings are currently ignored
+	}
+
+	// Configure
+	if err := b.Configure(config); err != nil {
+		return nil, fmt.Errorf(errBackendNewConfig, c.Type, err)
+	}
+
+	// TODO: migrate local state to remote
+
+	// Store the metadata in our saved state location
+	s := sMgr.State()
+	if s == nil {
+		s = terraform.NewState()
+	}
+	s.Backend = &terraform.BackendState{
+		Type:   c.Type,
+		Config: config.Raw,
+		Hash:   c.Hash(),
+	}
+	if err := sMgr.WriteState(s); err != nil {
+		return nil, fmt.Errorf(errBackendWriteSaved, err)
+	}
+	if err := sMgr.PersistState(); err != nil {
+		return nil, fmt.Errorf(errBackendWriteSaved, err)
+	}
+
+	// Return the backend
+	return b, nil
+}
+
 // Initiailizing an unchanged saved backend
 func (m *Meta) backend_C_r_S_unchanged(
 	c *config.Backend, sMgr state.State) (backend.Backend, error) {
@@ -391,6 +446,25 @@ The error(s) configuring the legacy remote state:
 %s
 `
 
+const errBackendNewConfig = `
+Error configuring the backend %q: %s
+
+Please update the configuration in your Terraform files to fix this error
+then run this command again.
+`
+
+const errBackendNewUnknown = `
+The backend %q could not be found.
+
+This is the backend specified in your Terraform configuration file.
+This error could be a simple typo in your configuration, but it can also
+be caused by using a Terraform version that doesn't support the specified
+backend type. Please check your configuration and your Terraform version.
+
+If you'd like to run Terraform and store state locally, you can fix this
+error by removing the backend configuration from your configuration.
+`
+
 const errBackendSavedConfig = `
 Error configuring the backend %q: %s
 
@@ -410,6 +484,15 @@ contains support for this backend.
 
 If you'd like to force remove this backend, you must update your configuration
 to not use the backend and run "terraform init" (or any other command) again.
+`
+
+const errBackendWriteSaved = `
+Error saving the backend configuration: %s
+
+Terraform saves the complete backend configuration in a local file for
+configuring the backend on future operations. This cannot be disabled. Errors
+are usually due to simple file permission errors. Please look at the error
+above, resolve it, and try again.
 `
 
 const warnBackendLegacy = `
