@@ -27,6 +27,10 @@ type BackendOpts struct {
 	// configuration. If "-backend-config" is set and processed on Meta,
 	// that will take priority.
 	ConfigPath string
+
+	// ForceLocal will force a purely local backend, including state.
+	// You probably don't want to set this.
+	ForceLocal bool
 }
 
 // Backend initializes and returns the backend for this CLI session.
@@ -62,27 +66,32 @@ func (m *Meta) Backend(opts *BackendOpts) (backend.Enhanced, error) {
 		backupPath = ""
 	}
 
-	// Get the local backend configuration.
-	config, err := m.backendConfig(opts)
-	if err != nil {
-		return nil, fmt.Errorf("Error loading backend config: %s", err)
-	}
+	// Initialize a backend from the config unless we're forcing a purely
+	// local operation.
+	var b backend.Backend
+	if !opts.ForceLocal {
+		// Get the local backend configuration.
+		config, err := m.backendConfig(opts)
+		if err != nil {
+			return nil, fmt.Errorf("Error loading backend config: %s", err)
+		}
 
-	// Get the path to where we store a local cache of backend configuration
-	// if we're using a remote backend. This may not yet exist which means
-	// we haven't used a non-local backend before. That is okay.
-	dataStatePath := filepath.Join(m.DataDir(), DefaultStateFilename)
-	dataStateMgr := &state.LocalState{Path: dataStatePath}
-	if err := dataStateMgr.RefreshState(); err != nil {
-		return nil, fmt.Errorf("Error loading state: %s", err)
-	}
+		// Get the path to where we store a local cache of backend configuration
+		// if we're using a remote backend. This may not yet exist which means
+		// we haven't used a non-local backend before. That is okay.
+		dataStatePath := filepath.Join(m.DataDir(), DefaultStateFilename)
+		dataStateMgr := &state.LocalState{Path: dataStatePath}
+		if err := dataStateMgr.RefreshState(); err != nil {
+			return nil, fmt.Errorf("Error loading state: %s", err)
+		}
 
-	// Get the final backend configuration to use. This will handle any
-	// conflicts (legacy remote state, new config, config changes, etc.)
-	// and only return the final configuration to use.
-	b, err := m.backendFromConfig(config, dataStateMgr)
-	if err != nil {
-		return nil, err
+		// Get the final backend configuration to use. This will handle any
+		// conflicts (legacy remote state, new config, config changes, etc.)
+		// and only return the final configuration to use.
+		b, err = m.backendFromConfig(config, dataStateMgr)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	log.Printf("[INFO] command: backend initialized: %T", b)
@@ -331,7 +340,7 @@ func (m *Meta) backend_c_R_s(
 	return b, nil
 }
 
-// Configuring a backend for the first time
+// Configuring a backend for the first time.
 func (m *Meta) backend_C_r_s(
 	c *config.Backend, sMgr state.State) (backend.Backend, error) {
 	// Create the config.
@@ -362,7 +371,78 @@ func (m *Meta) backend_C_r_s(
 		return nil, fmt.Errorf(errBackendNewConfig, c.Type, err)
 	}
 
-	// TODO: migrate local state to remote
+	// Grab a purely local backend to get the local state if it exists
+	localB, err := m.Backend(&BackendOpts{ForceLocal: true})
+	if err != nil {
+		return nil, fmt.Errorf(errBackendLocalRead, err)
+	}
+	localState, err := localB.State()
+	if err != nil {
+		return nil, fmt.Errorf(errBackendLocalRead, err)
+	}
+	if err := localState.RefreshState(); err != nil {
+		return nil, fmt.Errorf(errBackendLocalRead, err)
+	}
+	if localS := localState.State(); !localS.Empty() {
+		// Grab the backend state to determine if we need to do a migration
+		backendState, err := b.State()
+		if err != nil {
+			return nil, fmt.Errorf(errBackendRemoteRead, err)
+		}
+		if err := backendState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(errBackendRemoteRead, err)
+		}
+		backendS := backendState.State()
+
+		if backendS.Empty() {
+			migrate := false
+			for {
+				// If the backend state is empty, we just want to ask if the user
+				// wants to move the local state to the backend.
+				v, err := m.UIInput().Input(&terraform.InputOpts{
+					Id:          "backend-migrate-to-backend",
+					Query:       "Do you want to migrate existing state?",
+					Description: strings.TrimSpace(inputBackendMigrateNew),
+				})
+				if err != nil {
+					return nil, fmt.Errorf(
+						"Error asking for state migration action: %s", err)
+				}
+
+				// Force an exact answer
+				if v == "yes" {
+					migrate = true
+					break
+				} else if v == "no" {
+					migrate = false
+					break
+				}
+			}
+
+			if migrate {
+				// Write the local state to the backend
+				if err := backendState.WriteState(localS); err != nil {
+					return nil, fmt.Errorf(errBackendMigrateNew, err)
+				}
+				if err := backendState.PersistState(); err != nil {
+					return nil, fmt.Errorf(errBackendMigrateNew, err)
+				}
+			}
+
+			// Delete the local state
+			if err := localState.WriteState(nil); err != nil {
+				return nil, fmt.Errorf(errBackendMigrateLocalDelete, err)
+			}
+			if err := localState.PersistState(); err != nil {
+				return nil, fmt.Errorf(errBackendMigrateLocalDelete, err)
+			}
+		} else {
+			// If the backend state is not empty, then we need to save it
+			// to a local file and let the user choose if they want to
+			// migrate and if so, which file to choose.
+			panic("unhandled")
+		}
+	}
 
 	// Store the metadata in our saved state location
 	s := sMgr.State()
@@ -446,6 +526,32 @@ The error(s) configuring the legacy remote state:
 %s
 `
 
+const errBackendLocalRead = `
+Error reading local state: %s
+
+Terraform is trying to read your local state to determine if there is
+state to migrate to your newly configured backend. Terraform can't continue
+without this check because that would risk losing state. Please resolve the
+error above and try again.
+`
+
+const errBackendMigrateLocalDelete = `
+Error deleting local state after migration: %s
+
+Your local state is deleted after successfully migrating it to the newly
+configured backend. As part of the deletion process, a backup is made at
+the standard backup path unless explicitly asked not to. To cleanly operate
+with a backend, we must delete the local state file. Please resolve the
+issue above and retry the command.
+`
+
+const errBackendMigrateNew = `
+Error migrating local state to backend: %s
+
+Your local state remains intact and unmodified. Please resolve the error
+above and try again.
+`
+
 const errBackendNewConfig = `
 Error configuring the backend %q: %s
 
@@ -463,6 +569,15 @@ backend type. Please check your configuration and your Terraform version.
 
 If you'd like to run Terraform and store state locally, you can fix this
 error by removing the backend configuration from your configuration.
+`
+
+const errBackendRemoteRead = `
+Error reading backend state: %s
+
+Terraform is trying to read the state from your configured backend to
+determien if there is any migration steps necessary. Terraform can't continue
+without this check because that would risk losing state. Please resolve the
+error above and try again.
 `
 
 const errBackendSavedConfig = `
@@ -493,6 +608,16 @@ Terraform saves the complete backend configuration in a local file for
 configuring the backend on future operations. This cannot be disabled. Errors
 are usually due to simple file permission errors. Please look at the error
 above, resolve it, and try again.
+`
+
+const inputBackendMigrateNew = `
+Pre-existing local state was found while configuring the new backend.
+No existing state was found in the backend itself. Do you want to migrate
+your local state to the new backend? Enter "yes" to migrate or "no" to start
+with a blank state.
+
+WARNING: If you answer "no", then your existing local state will be DELETED
+There is no recovery for this. Your local state will be completely lost.
 `
 
 const warnBackendLegacy = `

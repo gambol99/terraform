@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/terraform/helper/copy"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
 )
@@ -236,9 +237,11 @@ func TestMetaBackend_emptyLegacyRemote(t *testing.T) {
 
 // Newly configured backend
 func TestMetaBackend_configureNew(t *testing.T) {
-	defer testChdir(t, testFixturePath("backend-new"))()
-	defer os.Remove("local-state.tfstate")
-	defer os.RemoveAll(".terraform")
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("backend-new"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
 
 	// Setup the meta
 	m := testMetaBackend(t, nil)
@@ -294,6 +297,122 @@ func TestMetaBackend_configureNew(t *testing.T) {
 
 	// Verify a backup doesn't exist
 	if _, err := os.Stat(DefaultStateFilename + DefaultBackupExtension); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+}
+
+// Newly configured backend with prior local state and no remote state
+func TestMetaBackend_configureNewWithState(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("backend-new-migrate"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	// Ask input
+	defer testInteractiveInput(t, []string{"yes"})()
+
+	// Setup the meta
+	m := testMetaBackend(t, nil)
+
+	// Get the backend
+	b, err := m.Backend(nil)
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Check the state
+	s, err := b.State()
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	if err := s.RefreshState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	state := s.State()
+	if state == nil {
+		t.Fatal("state is nil")
+	}
+	if state.Lineage != "backend-new-migrate" {
+		t.Fatalf("bad: %#v", state)
+	}
+
+	// Write some state
+	state = terraform.NewState()
+	state.Lineage = "changing"
+	s.WriteState(state)
+	if err := s.PersistState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Verify the state is where we expect
+	{
+		f, err := os.Open("local-state.tfstate")
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		actual, err := terraform.ReadState(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		if actual.Lineage != state.Lineage {
+			t.Fatalf("bad: %#v", actual)
+		}
+	}
+
+	// Verify the default paths don't exist
+	if _, err := os.Stat(DefaultStateFilename); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Verify a backup does exist
+	if _, err := os.Stat(DefaultStateFilename + DefaultBackupExtension); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+}
+
+// Newly configured backend with prior local state and no remote state,
+// but opting to not migrate.
+func TestMetaBackend_configureNewWithStateNoMigrate(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("backend-new-migrate"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	// Ask input
+	defer testInteractiveInput(t, []string{"no"})()
+
+	// Setup the meta
+	m := testMetaBackend(t, nil)
+
+	// Get the backend
+	b, err := m.Backend(nil)
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Check the state
+	s, err := b.State()
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	if err := s.RefreshState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	if state := s.State(); state != nil {
+		t.Fatal("state is not nil")
+	}
+
+	// Verify the default paths don't exist
+	if _, err := os.Stat(DefaultStateFilename); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Verify a backup does exist
+	if _, err := os.Stat(DefaultStateFilename + DefaultBackupExtension); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 }

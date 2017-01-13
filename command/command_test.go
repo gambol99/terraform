@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"io/ioutil"
@@ -400,4 +401,19 @@ func testStdoutCapture(t *testing.T, dst io.Writer) func() {
 		// Wait for the data copy to complete to avoid a race reading data
 		<-doneCh
 	}
+}
+
+// testInteractiveInput configures tests so that the answers given are sent
+// in order to interactive prompts. The returned function must be called
+// in a defer to clean up.
+func testInteractiveInput(t *testing.T, answers []string) func() {
+	// Disable test mode so input is called
+	test = false
+
+	// Setup reader/writers
+	defaultInputReader = bytes.NewBufferString(strings.Join(answers, "\n") + "\n")
+	defaultInputWriter = new(bytes.Buffer)
+
+	// Return the cleanup
+	return func() { test = true }
 }
