@@ -224,6 +224,9 @@ func (m *Meta) backendFromConfig(
 		s = terraform.NewState()
 	}
 
+	// This giant switch statement covers all eight possible combinations
+	// of state settings between: configuring new backends, saved (previously-
+	// configured) backends, and legacy remote state.
 	switch {
 	// No configuration set at all. Pure local state.
 	case c == nil && s.Remote.Empty() && s.Backend.Empty():
@@ -264,7 +267,7 @@ func (m *Meta) backendFromConfig(
 	// remote state. This is very possible if a Terraform user configures
 	// a backend prior to ever running Terraform on an old state.
 	case c != nil && !s.Remote.Empty() && s.Backend.Empty():
-		panic("unhandled")
+		return m.backend_C_R_s(c, sMgr)
 
 	// Configuring a backend with both a legacy remote state set
 	// and a pre-existing backend saved.
@@ -416,35 +419,124 @@ func (m *Meta) backend_c_R_s(
 	return b, nil
 }
 
+// Configuring a backend for the first time with legacy remote state.
+func (m *Meta) backend_C_R_s(
+	c *config.Backend, sMgr state.State) (backend.Backend, error) {
+	// Notify the user
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset]%s\n\n",
+		strings.TrimSpace(outputBackendConfigureWithLegacy))))
+
+	// First, configure the new backend
+	b, err := m.backendInitFromConfig(c)
+	if err != nil {
+		return nil, err
+	}
+
+	// Next, save the new configuration. This will not overwrite our
+	// legacy remote state. We'll handle that after.
+	s := sMgr.State()
+	if s == nil {
+		s = terraform.NewState()
+	}
+	s.Backend = &terraform.BackendState{
+		Type:   c.Type,
+		Config: c.RawConfig.Raw,
+		Hash:   c.Hash(),
+	}
+	if err := sMgr.WriteState(s); err != nil {
+		return nil, fmt.Errorf(errBackendWriteSaved, err)
+	}
+	if err := sMgr.PersistState(); err != nil {
+		return nil, fmt.Errorf(errBackendWriteSaved, err)
+	}
+
+	// I don't know how this is possible but if we don't have remote
+	// state config anymore somehow, just return the backend. This
+	// shouldn't be possible, though.
+	if s.Remote.Empty() {
+		return b, nil
+	}
+
+	// Finally, ask the user if they want to copy the state from
+	// their old remote state location.
+	copy, err := m.confirm(&terraform.InputOpts{
+		Id: "backend-migrate-to-new",
+		Query: fmt.Sprintf(
+			"Do you want to copy the legacy remote state from %q?",
+			s.Remote.Type),
+		Description: strings.TrimSpace(inputBackendMigrateLegacy),
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"Error asking for state copy action: %s", err)
+	}
+
+	// If the user wants a copy, copy!
+	if copy {
+		// Initialize the legacy backend
+		oldB, err := m.backendInitFromLegacy(s.Remote)
+		if err != nil {
+			return nil, err
+		}
+		oldState, err := oldB.State()
+		if err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+		if err := oldState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+
+		// Get the new state
+		newState, err := b.State()
+		if err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendNewRead), err)
+		}
+		if err := newState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendNewRead), err)
+		}
+
+		// Perform the migration
+		err = m.backendMigrateState(&backendMigrateOpts{
+			OneType: s.Remote.Type,
+			TwoType: c.Type,
+			One:     oldState,
+			Two:     newState,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Unset the remote state
+	s = sMgr.State()
+	if s == nil {
+		s = terraform.NewState()
+	}
+	s.Remote = nil
+	if err := sMgr.WriteState(s); err != nil {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendClearLegacy), err)
+	}
+	if err := sMgr.PersistState(); err != nil {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendClearLegacy), err)
+	}
+
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset][green]%s\n\n",
+		strings.TrimSpace(successBackendSet), s.Backend.Type)))
+
+	return b, nil
+}
+
 // Configuring a backend for the first time.
 func (m *Meta) backend_C_r_s(
 	c *config.Backend, sMgr state.State) (backend.Backend, error) {
-	// Create the config.
-	config := terraform.NewResourceConfig(c.RawConfig)
-
 	// Get the backend
-	f, ok := Backends[c.Type]
-	if !ok {
-		return nil, fmt.Errorf(strings.TrimSpace(errBackendNewUnknown), c.Type)
-	}
-	b := f()
-
-	// TODO: input
-
-	// Validate
-	warns, errs := b.Validate(config)
-	if len(errs) > 0 {
-		return nil, fmt.Errorf(
-			"Error configuring the backend %q: %s",
-			c.Type, multierror.Append(nil, errs...))
-	}
-	if len(warns) > 0 {
-		// TODO: warnings are currently ignored
-	}
-
-	// Configure
-	if err := b.Configure(config); err != nil {
-		return nil, fmt.Errorf(errBackendNewConfig, c.Type, err)
+	b, err := m.backendInitFromConfig(c)
+	if err != nil {
+		return nil, err
 	}
 
 	// Grab a purely local backend to get the local state if it exists
@@ -498,7 +590,7 @@ func (m *Meta) backend_C_r_s(
 	}
 	s.Backend = &terraform.BackendState{
 		Type:   c.Type,
-		Config: config.Raw,
+		Config: c.RawConfig.Raw,
 		Hash:   c.Hash(),
 	}
 	if err := sMgr.WriteState(s); err != nil {
@@ -670,6 +762,32 @@ func (m *Meta) backendInitFromConfig(c *config.Backend) (backend.Backend, error)
 	return b, nil
 }
 
+func (m *Meta) backendInitFromLegacy(s *terraform.RemoteState) (backend.Backend, error) {
+	// We need to convert the config to map[string]interface{} since that
+	// is what the backends expect.
+	var configMap map[string]interface{}
+	if err := mapstructure.Decode(s.Config, &configMap); err != nil {
+		return nil, fmt.Errorf("Error configuring remote state: %s", err)
+	}
+
+	// Create the config
+	rawC, err := config.NewRawConfig(configMap)
+	if err != nil {
+		return nil, fmt.Errorf("Error configuring remote state: %s", err)
+	}
+	config := terraform.NewResourceConfig(rawC)
+
+	// Initialize the legacy remote backend
+	b := &backendlegacy.Backend{Type: s.Type}
+
+	// Configure
+	if err := b.Configure(config); err != nil {
+		return nil, fmt.Errorf(errBackendLegacyConfig, err)
+	}
+
+	return b, nil
+}
+
 //-------------------------------------------------------------------
 // Output constants and initialization code
 //-------------------------------------------------------------------
@@ -801,6 +919,14 @@ If you'd like to force remove this backend, you must update your configuration
 to not use the backend and run "terraform init" (or any other command) again.
 `
 
+const errBackendClearLegacy = `
+Error clearing the legacy remote state configuration: %s
+
+Terraform completed configuring your backend. It is now safe to remove
+the legacy remote state configuration, but an error occurred while trying
+to do so. Please look at the error above, resolve it, and try again.
+`
+
 const errBackendClearSaved = `
 Error clearing the backend configuration: %s
 
@@ -826,10 +952,24 @@ answering "yes" or "no" shouldn't make a difference. Please answer exactly
 "yes" or "no".
 `
 
+const inputBackendMigrateLegacy = `
+Terraform can copy the existing state in your legacy remote state
+backend to your newly configured backend. Please answer "yes" or "no".
+`
+
 const inputBackendMigrateLocal = `
 Terraform has detected you're unconfiguring your previously set backend.
 Would you like to copy the state from %q to local state? Please answer
 "yes" or "no". If you answer "no", you will start with a blank local state.
+`
+
+const outputBackendConfigureWithLegacy = `
+[reset][bold]New backend configuration detected with legacy remote state![reset]
+
+Terraform has detected that you're attempting to configure a new backend.
+At the same time, legacy remote state configuration was found. Terraform will
+first configure the new backend, and then ask if you'd like to migrate
+your remote state to the new backend.
 `
 
 const outputBackendReconfigure = `

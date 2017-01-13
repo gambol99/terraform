@@ -29,6 +29,8 @@ website/vendor
 # Test exclusions
 !command/test-fixtures/backend-change/.terraform/
 !command/test-fixtures/backend-change/.terraform/terraform.tfstate
+!command/test-fixtures/backend-new-legacy/.terraform/
+!command/test-fixtures/backend-new-legacy/.terraform/terraform.tfstate
 !command/test-fixtures/backend-new-migrate/terraform.tfstate
 !command/test-fixtures/backend-new-migrate-existing/terraform.tfstate
 !command/test-fixtures/backend-unset/.terraform/

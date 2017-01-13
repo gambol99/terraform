@@ -561,6 +561,189 @@ func TestMetaBackend_configureNewWithStateExistingNoMigrate(t *testing.T) {
 	}
 }
 
+// Newly configured backend with lgacy
+func TestMetaBackend_configureNewLegacy(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("backend-new-legacy"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	// Ask input
+	defer testInteractiveInput(t, []string{"no"})()
+
+	// Setup the meta
+	m := testMetaBackend(t, nil)
+
+	// Get the backend
+	b, err := m.Backend(nil)
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Check the state
+	s, err := b.State()
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	if err := s.RefreshState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	state := s.State()
+	if state != nil {
+		t.Fatal("state should be nil")
+	}
+
+	// Verify we have no configured legacy
+	{
+		path := filepath.Join(m.DataDir(), DefaultStateFilename)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		actual, err := terraform.ReadState(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		if !actual.Remote.Empty() {
+			t.Fatalf("bad: %#v", actual)
+		}
+		if actual.Backend.Empty() {
+			t.Fatalf("bad: %#v", actual)
+		}
+	}
+
+	// Write some state
+	state = terraform.NewState()
+	state.Lineage = "changing"
+	s.WriteState(state)
+	if err := s.PersistState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Verify the state is where we expect
+	{
+		f, err := os.Open("local-state.tfstate")
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		actual, err := terraform.ReadState(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		if actual.Lineage != state.Lineage {
+			t.Fatalf("bad: %#v", actual)
+		}
+	}
+
+	// Verify the default paths don't exist
+	if _, err := os.Stat(DefaultStateFilename); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Verify a backup doesn't exist
+	if _, err := os.Stat(DefaultStateFilename + DefaultBackupExtension); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+}
+
+// Newly configured backend with legacy
+func TestMetaBackend_configureNewLegacyCopy(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("backend-new-legacy"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	// Ask input
+	defer testInteractiveInput(t, []string{"yes", "yes"})()
+
+	// Setup the meta
+	m := testMetaBackend(t, nil)
+
+	// Get the backend
+	b, err := m.Backend(nil)
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Check the state
+	s, err := b.State()
+	if err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	if err := s.RefreshState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+	state := s.State()
+	if state == nil {
+		t.Fatal("nil state")
+	}
+	if state.Lineage != "backend-new-legacy" {
+		t.Fatalf("bad: %#v", state)
+	}
+
+	// Verify we have no configured legacy
+	{
+		path := filepath.Join(m.DataDir(), DefaultStateFilename)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		actual, err := terraform.ReadState(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		if !actual.Remote.Empty() {
+			t.Fatalf("bad: %#v", actual)
+		}
+		if actual.Backend.Empty() {
+			t.Fatalf("bad: %#v", actual)
+		}
+	}
+
+	// Write some state
+	state = terraform.NewState()
+	state.Lineage = "changing"
+	s.WriteState(state)
+	if err := s.PersistState(); err != nil {
+		t.Fatalf("bad: %s", err)
+	}
+
+	// Verify the state is where we expect
+	{
+		f, err := os.Open("local-state.tfstate")
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		actual, err := terraform.ReadState(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		if actual.Lineage != state.Lineage {
+			t.Fatalf("bad: %#v", actual)
+		}
+	}
+
+	// Verify the default paths don't exist
+	if _, err := os.Stat(DefaultStateFilename); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	// Verify a backup doesn't exist
+	if _, err := os.Stat(DefaultStateFilename + DefaultBackupExtension); err == nil {
+		t.Fatalf("err: %s", err)
+	}
+}
+
 // Saved backend state matching config
 func TestMetaBackend_configuredUnchanged(t *testing.T) {
 	defer testChdir(t, testFixturePath("backend-unchanged"))()
