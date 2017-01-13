@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-getter"
@@ -363,6 +364,26 @@ func (m *Meta) uiHook() *UiHook {
 		Colorize: m.Colorize(),
 		Ui:       m.Ui,
 	}
+}
+
+// confirm asks a yes/no confirmation.
+func (m *Meta) confirm(opts *terraform.InputOpts) (bool, error) {
+	for {
+		v, err := m.UIInput().Input(opts)
+		if err != nil {
+			return false, fmt.Errorf(
+				"Error asking for confirmation: %s", err)
+		}
+
+		switch strings.ToLower(v) {
+		case "no":
+			return false, nil
+		case "yes":
+			return true, nil
+		}
+	}
+
+	panic("unreachable")
 }
 
 const (

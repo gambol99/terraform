@@ -411,9 +411,13 @@ func testInteractiveInput(t *testing.T, answers []string) func() {
 	test = false
 
 	// Setup reader/writers
-	defaultInputReader = bytes.NewBufferString(strings.Join(answers, "\n") + "\n")
+	testInputResponse = answers
+	defaultInputReader = bytes.NewBufferString("")
 	defaultInputWriter = new(bytes.Buffer)
 
 	// Return the cleanup
-	return func() { test = true }
+	return func() {
+		test = true
+		testInputResponse = nil
+	}
 }

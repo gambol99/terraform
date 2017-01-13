@@ -231,7 +231,7 @@ func (m *Meta) backendFromConfig(
 
 	// We're unsetting a backend (moving from backend => local)
 	case c == nil && s.Remote.Empty() && !s.Backend.Empty():
-		panic("unhandled")
+		return m.backend_c_r_S(c, sMgr)
 
 	// We have a legacy remote state configuration but no new backend config
 	case c == nil && !s.Remote.Empty() && s.Backend.Empty():
@@ -307,6 +307,81 @@ func (m *Meta) backendFromConfig(
 //   * S - Backend configuration is set in the state
 //
 //-------------------------------------------------------------------
+
+// Unconfiguring a backend (moving from backend => local).
+func (m *Meta) backend_c_r_S(
+	c *config.Backend, sMgr state.State) (backend.Backend, error) {
+	s := sMgr.State()
+
+	// Confirm with the user that the copy should occur
+	copy, err := m.confirm(&terraform.InputOpts{
+		Id:          "backend-migrate-to-local",
+		Query:       fmt.Sprintf("Do you want to copy the state from %q?", s.Backend.Type),
+		Description: strings.TrimSpace(inputBackendMigrateLocal),
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"Error asking for state copy action: %s", err)
+	}
+
+	// If we're copying, perform the migration
+	if copy {
+		// Grab a purely local backend to get the local state if it exists
+		localB, err := m.Backend(&BackendOpts{ForceLocal: true})
+		if err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendLocalRead), err)
+		}
+		localState, err := localB.State()
+		if err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendLocalRead), err)
+		}
+		if err := localState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendLocalRead), err)
+		}
+
+		// Initialize the configured backend
+		b, err := m.backend_C_r_S_unchanged(c, sMgr)
+		if err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+		backendState, err := b.State()
+		if err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+		if err := backendState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+
+		// Perform the migration
+		err = m.backendMigrateState(&backendMigrateOpts{
+			OneType: s.Backend.Type,
+			TwoType: "local",
+			One:     backendState,
+			Two:     localState,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Remove the stored metadata
+	if err := sMgr.WriteState(nil); err != nil {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendClearSaved), err)
+	}
+	if err := sMgr.PersistState(); err != nil {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendClearSaved), err)
+	}
+
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset][green]%s\n\n",
+		strings.TrimSpace(successBackendUnset), s.Backend.Type)))
+
+	// Return no backend
+	return nil, nil
+}
 
 func (m *Meta) backend_c_R_s(
 	c *config.Backend, sMgr state.State) (backend.Backend, error) {
@@ -559,6 +634,17 @@ If you'd like to update the configuration interactively without storing
 the values in your configuration, run "terraform init".
 `
 
+const errBackendSavedUnsetConfig = `
+Error configuring the existing backend %q: %s
+
+Terraform must configure the existing backend in order to copy the state
+from the existing backend, as requested. Please resolve the error and try
+again. If you choose to not copy the existing state, Terraform will not
+configure the backend. If the configuration is invalid, please update your
+Terraform configuration with proper configuration for this backend first
+before unsetting the backend.
+`
+
 const errBackendSavedUnknown = `
 The backend %q could not be found.
 
@@ -572,6 +658,15 @@ If you'd like to force remove this backend, you must update your configuration
 to not use the backend and run "terraform init" (or any other command) again.
 `
 
+const errBackendClearSaved = `
+Error clearing the backend configuration: %s
+
+Terraform removes the saved backend configuration when you're removing a
+configured backend. This must be done so future Terraform runs know to not
+use the backend configuration. Please look at the error above, resolve it,
+and try again.
+`
+
 const errBackendWriteSaved = `
 Error saving the backend configuration: %s
 
@@ -579,6 +674,16 @@ Terraform saves the complete backend configuration in a local file for
 configuring the backend on future operations. This cannot be disabled. Errors
 are usually due to simple file permission errors. Please look at the error
 above, resolve it, and try again.
+`
+
+const inputBackendMigrateLocal = `
+Terraform has detected you're unconfiguring your previously set backend.
+Would you like to copy the state from %q to local state? Please answer
+"yes" or "no". If you answer "no", you will start with a blank local state.
+`
+
+const successBackendUnset = `
+Successfully unset the backend %q. Terraform will now operate locally.
 `
 
 const warnBackendLegacy = `
