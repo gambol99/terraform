@@ -258,7 +258,7 @@ func (m *Meta) backendFromConfig(
 			return m.backend_C_r_S_unchanged(c, sMgr)
 		}
 
-		panic("unhandled")
+		return m.backend_C_r_S_changed(c, sMgr)
 
 	// Configuring a backend for the first time while having legacy
 	// remote state. This is very possible if a Terraform user configures
@@ -383,6 +383,7 @@ func (m *Meta) backend_c_r_S(
 	return nil, nil
 }
 
+// Legacy remote state
 func (m *Meta) backend_c_R_s(
 	c *config.Backend, sMgr state.State) (backend.Backend, error) {
 	s := sMgr.State()
@@ -507,7 +508,100 @@ func (m *Meta) backend_C_r_s(
 		return nil, fmt.Errorf(errBackendWriteSaved, err)
 	}
 
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset][green]%s\n\n",
+		strings.TrimSpace(successBackendSet), s.Backend.Type)))
+
 	// Return the backend
+	return b, nil
+}
+
+// Changing a previously saved backend.
+func (m *Meta) backend_C_r_S_changed(
+	c *config.Backend, sMgr state.State) (backend.Backend, error) {
+	// Notify the user
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset]%s\n\n",
+		strings.TrimSpace(outputBackendReconfigure))))
+
+	// Get the backend
+	b, err := m.backendInitFromConfig(c)
+
+	// Check with the user if we want to migrate state
+	copy, err := m.confirm(&terraform.InputOpts{
+		Id:          "backend-migrate-to-new",
+		Query:       fmt.Sprintf("Do you want to copy the state from %q?", c.Type),
+		Description: strings.TrimSpace(inputBackendMigrateChange),
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"Error asking for state copy action: %s", err)
+	}
+
+	// If we are, then we need to initialize the old backend and
+	// perform the copy.
+	if copy {
+		// Grab the existing backend
+		oldB, err := m.backend_C_r_S_unchanged(c, sMgr)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"Error loading previously configured backend: %s", err)
+		}
+
+		// Get the old state
+		s := sMgr.State()
+		oldState, err := oldB.State()
+		if err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+		if err := oldState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(
+				strings.TrimSpace(errBackendSavedUnsetConfig), s.Backend.Type, err)
+		}
+
+		// Get the new state
+		newState, err := b.State()
+		if err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendNewRead), err)
+		}
+		if err := newState.RefreshState(); err != nil {
+			return nil, fmt.Errorf(strings.TrimSpace(errBackendNewRead), err)
+		}
+
+		// Perform the migration
+		err = m.backendMigrateState(&backendMigrateOpts{
+			OneType: s.Backend.Type,
+			TwoType: c.Type,
+			One:     oldState,
+			Two:     newState,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Update the backend state
+	s := sMgr.State()
+	if s == nil {
+		s = terraform.NewState()
+	}
+	s.Backend = &terraform.BackendState{
+		Type:   c.Type,
+		Config: c.RawConfig.Raw,
+		Hash:   c.Hash(),
+	}
+	if err := sMgr.WriteState(s); err != nil {
+		return nil, fmt.Errorf(errBackendWriteSaved, err)
+	}
+	if err := sMgr.PersistState(); err != nil {
+		return nil, fmt.Errorf(errBackendWriteSaved, err)
+	}
+
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset][green]%s\n\n",
+		strings.TrimSpace(successBackendSet), s.Backend.Type)))
+
 	return b, nil
 }
 
@@ -539,6 +633,46 @@ func (m *Meta) backend_C_r_S_unchanged(
 
 	return b, nil
 }
+
+//-------------------------------------------------------------------
+// Reusable helper functions for backend management
+//-------------------------------------------------------------------
+
+func (m *Meta) backendInitFromConfig(c *config.Backend) (backend.Backend, error) {
+	// Create the config.
+	config := terraform.NewResourceConfig(c.RawConfig)
+
+	// Get the backend
+	f, ok := Backends[c.Type]
+	if !ok {
+		return nil, fmt.Errorf(strings.TrimSpace(errBackendNewUnknown), c.Type)
+	}
+	b := f()
+
+	// TODO: input
+
+	// Validate
+	warns, errs := b.Validate(config)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf(
+			"Error configuring the backend %q: %s",
+			c.Type, multierror.Append(nil, errs...))
+	}
+	if len(warns) > 0 {
+		// TODO: warnings are currently ignored
+	}
+
+	// Configure
+	if err := b.Configure(config); err != nil {
+		return nil, fmt.Errorf(errBackendNewConfig, c.Type, err)
+	}
+
+	return b, nil
+}
+
+//-------------------------------------------------------------------
+// Output constants and initialization code
+//-------------------------------------------------------------------
 
 // Backends is the list of available backends. This is currently a hardcoded
 // list that can't be modified without recompiling Terraform. This is done
@@ -603,6 +737,15 @@ Error configuring the backend %q: %s
 
 Please update the configuration in your Terraform files to fix this error
 then run this command again.
+`
+
+const errBackendNewRead = `
+Error reading newly configured backend state: %s
+
+Terraform is trying to read the state from your newly configured backend
+to determine the copy process for your existing state. Backends are expected
+to not error even if there is no state yet written. Please resolve the
+error above and try again.
 `
 
 const errBackendNewUnknown = `
@@ -676,14 +819,35 @@ are usually due to simple file permission errors. Please look at the error
 above, resolve it, and try again.
 `
 
+const inputBackendMigrateChange = `
+Would you like to copy the state from your prior backend %q to the
+newly configured backend %q? If you're reconfiguring the same backend,
+answering "yes" or "no" shouldn't make a difference. Please answer exactly
+"yes" or "no".
+`
+
 const inputBackendMigrateLocal = `
 Terraform has detected you're unconfiguring your previously set backend.
 Would you like to copy the state from %q to local state? Please answer
 "yes" or "no". If you answer "no", you will start with a blank local state.
 `
 
+const outputBackendReconfigure = `
+[reset][bold]Backend configuration changed![reset]
+
+Terraform has detected that the configuration specified for the backend
+has changed. Terraform will now reconfigure for this backend. If you didn't
+intend to reconfigure your backend please undo any changes to the "backend"
+section in your Terraform configuration.
+`
+
 const successBackendUnset = `
 Successfully unset the backend %q. Terraform will now operate locally.
+`
+
+const successBackendSet = `
+Successfully configured the backend %q! Terraform will automatically
+use this backend unless the backend configuration changes.
 `
 
 const warnBackendLegacy = `
