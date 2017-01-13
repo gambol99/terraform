@@ -28,3 +28,4 @@ website/vendor
 
 # Test exclusions
 !command/test-fixtures/backend-new-migrate/terraform.tfstate
+!command/test-fixtures/backend-new-migrate-existing/terraform.tfstate

@@ -383,8 +383,10 @@ func (m *Meta) backend_C_r_s(
 	if err := localState.RefreshState(); err != nil {
 		return nil, fmt.Errorf(errBackendLocalRead, err)
 	}
+
+	// If the local state is not empty, we need to potentially do a
+	// state migration to the new backend (with user permission).
 	if localS := localState.State(); !localS.Empty() {
-		// Grab the backend state to determine if we need to do a migration
 		backendState, err := b.State()
 		if err != nil {
 			return nil, fmt.Errorf(errBackendRemoteRead, err)
@@ -392,55 +394,24 @@ func (m *Meta) backend_C_r_s(
 		if err := backendState.RefreshState(); err != nil {
 			return nil, fmt.Errorf(errBackendRemoteRead, err)
 		}
-		backendS := backendState.State()
 
-		if backendS.Empty() {
-			migrate := false
-			for {
-				// If the backend state is empty, we just want to ask if the user
-				// wants to move the local state to the backend.
-				v, err := m.UIInput().Input(&terraform.InputOpts{
-					Id:          "backend-migrate-to-backend",
-					Query:       "Do you want to migrate existing state?",
-					Description: strings.TrimSpace(inputBackendMigrateNew),
-				})
-				if err != nil {
-					return nil, fmt.Errorf(
-						"Error asking for state migration action: %s", err)
-				}
+		// Perform the migration
+		err = m.backendMigrateState(&backendMigrateOpts{
+			OneType: "local",
+			TwoType: c.Type,
+			One:     localState,
+			Two:     backendState,
+		})
+		if err != nil {
+			return nil, err
+		}
 
-				// Force an exact answer
-				if v == "yes" {
-					migrate = true
-					break
-				} else if v == "no" {
-					migrate = false
-					break
-				}
-			}
-
-			if migrate {
-				// Write the local state to the backend
-				if err := backendState.WriteState(localS); err != nil {
-					return nil, fmt.Errorf(errBackendMigrateNew, err)
-				}
-				if err := backendState.PersistState(); err != nil {
-					return nil, fmt.Errorf(errBackendMigrateNew, err)
-				}
-			}
-
-			// Delete the local state
-			if err := localState.WriteState(nil); err != nil {
-				return nil, fmt.Errorf(errBackendMigrateLocalDelete, err)
-			}
-			if err := localState.PersistState(); err != nil {
-				return nil, fmt.Errorf(errBackendMigrateLocalDelete, err)
-			}
-		} else {
-			// If the backend state is not empty, then we need to save it
-			// to a local file and let the user choose if they want to
-			// migrate and if so, which file to choose.
-			panic("unhandled")
+		// We always delete the local state
+		if err := localState.WriteState(nil); err != nil {
+			return nil, fmt.Errorf(errBackendMigrateLocalDelete, err)
+		}
+		if err := localState.PersistState(); err != nil {
+			return nil, fmt.Errorf(errBackendMigrateLocalDelete, err)
 		}
 	}
 
@@ -608,16 +579,6 @@ Terraform saves the complete backend configuration in a local file for
 configuring the backend on future operations. This cannot be disabled. Errors
 are usually due to simple file permission errors. Please look at the error
 above, resolve it, and try again.
-`
-
-const inputBackendMigrateNew = `
-Pre-existing local state was found while configuring the new backend.
-No existing state was found in the backend itself. Do you want to migrate
-your local state to the new backend? Enter "yes" to migrate or "no" to start
-with a blank state.
-
-WARNING: If you answer "no", then your existing local state will be DELETED
-There is no recovery for this. Your local state will be completely lost.
 `
 
 const warnBackendLegacy = `
