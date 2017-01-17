@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -79,8 +80,8 @@ func Funcs() map[string]ast.Function {
 		"md5":          interpolationFuncMd5(),
 		"merge":        interpolationFuncMerge(),
 		"min":          interpolationFuncMin(),
-		"uuid":         interpolationFuncUUID(),
 		"replace":      interpolationFuncReplace(),
+		"search":       interpolationFuncSearch(),
 		"sha1":         interpolationFuncSha1(),
 		"sha256":       interpolationFuncSha256(),
 		"signum":       interpolationFuncSignum(),
@@ -90,6 +91,7 @@ func Funcs() map[string]ast.Function {
 		"title":        interpolationFuncTitle(),
 		"trimspace":    interpolationFuncTrimSpace(),
 		"upper":        interpolationFuncUpper(),
+		"uuid":         interpolationFuncUUID(),
 		"zipmap":       interpolationFuncZipMap(),
 	}
 }
@@ -758,6 +760,48 @@ func interpolationFuncLength() ast.Function {
 			}
 
 			return 0, fmt.Errorf("arguments to length() must be a string, list, or map")
+		},
+	}
+}
+
+// interpolationFuncSearch returns a list matching the search criteria
+func interpolationFuncSearch() ast.Function {
+	return ast.Function{
+		ArgTypes:   []ast.Type{ast.TypeAny, ast.TypeString},
+		ReturnType: ast.TypeList,
+		Callback: func(args []interface{}) (interface{}, error) {
+			var matched []string
+			// step: get the arguments
+			list := args[0]
+			search := args[1].(string)
+			filter, err := regexp.Compile(search)
+			if err != nil {
+				return nil, fmt.Errorf("search() the regex: %s is invalid", search)
+			}
+			switch list.(type) {
+			case []ast.Variable:
+				for _, x := range list.([]ast.Variable) {
+					if filter.MatchString(x.Value.(string)) {
+						matched = append(matched, x.Value.(string))
+					}
+				}
+			case map[string]ast.Variable:
+				var keys []string
+				// build a sort list of the keys
+				for k := range list.(map[string]ast.Variable) {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					if filter.MatchString(k) {
+						matched = append(matched, (list.(map[string]ast.Variable))[k].Value.(string))
+					}
+				}
+			default:
+				return nil, errors.New("search() can only operate on maps or lists")
+			}
+
+			return stringSliceToVariableValue(matched), nil
 		},
 	}
 }

@@ -1669,7 +1669,6 @@ func TestInterpolateFuncElement(t *testing.T) {
 				"baz",
 				false,
 			},
-
 			{
 				`${element(var.a_short_list, "0")}`,
 				"foo",
@@ -1856,6 +1855,59 @@ func TestInterpolateFuncTrimSpace(t *testing.T) {
 				`${trimspace(" test ")}`,
 				"test",
 				false,
+			},
+		},
+	})
+}
+
+func TestInterpolateFuncSearchList(t *testing.T) {
+	testFunction(t, testFunctionConfig{
+		Vars: map[string]ast.Variable{
+			"var.a_list":     interfaceToVariableSwallowError([]string{"test1", "test2", "test3", "nothing"}),
+			"var.empty_list": interfaceToVariableSwallowError([]string{}),
+			"var.a_map":      interfaceToVariableSwallowError(map[string]string{"test1": "hello", "test2": "world", "nothing0": "nothing"}),
+			"var.empty_map":  interfaceToVariableSwallowError(map[string]string{}),
+		},
+		Cases: []testFunctionCase{
+			{ // an empty list
+				`${search(var.empty_list, ".*")}`,
+				[]interface{}{},
+				false,
+			},
+			{ // an empty map
+				`${search(var.empty_map, ".*")}`,
+				[]interface{}{},
+				false,
+			},
+			{
+				`${search(var.a_list, "test1")}`,
+				[]interface{}{"test1"},
+				false,
+			},
+			{
+				`${search(var.a_list, "test.*")}`,
+				[]interface{}{"test1", "test2", "test3"},
+				false,
+			},
+			{
+				`${search(var.a_map, "test.*")}`,
+				[]interface{}{"hello", "world"},
+				false,
+			},
+			{
+				`${search(var.a_map, "^noth")}`,
+				[]interface{}{"nothing"},
+				false,
+			},
+			{ // invalid regex
+				`${search(var.a_list, "^[dd")}`,
+				nil,
+				true,
+			},
+			{ // can only operate on maps or lists
+				`${search("hello", "hello")}`,
+				nil,
+				true,
 			},
 		},
 	})
